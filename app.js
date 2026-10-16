@@ -1490,7 +1490,7 @@ async function checkModelStatus() {
     modelConfigured = false;
     status.classList.remove("configured");
     status.querySelector("i").classList.remove("ready");
-    status.querySelector("span").textContent = "AI server unavailable · local demo still works";
+    status.querySelector("span").textContent = "AI status check unavailable · local demo still works";
     $("#analyze-photo").disabled = true;
     $("#generate-report").disabled = false;
     $("#report-model-note").textContent = "The saved-data report works offline; start the local server for the smart narrative.";
@@ -1597,15 +1597,25 @@ async function analyzePhoto() {
   $("#ai-report").hidden = true;
   $("#detailed-analysis").hidden = true;
   $("#followup-questions").hidden = true;
+  let analyzeRequestFailed = false;
   try {
     const image = await readFileAsBase64(file);
-    const response = await fetch("/api/analyze", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...image, context: buildUserContext() }),
-    });
+    let response;
+    try {
+      response = await fetch("/api/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...image, context: buildUserContext() }),
+      });
+    } catch (error) {
+      analyzeRequestFailed = true;
+      throw error;
+    }
     const result = await response.json();
-    if (!response.ok) throw new Error(result.error || "The AI analysis could not be completed.");
+    if (!response.ok) {
+      analyzeRequestFailed = true;
+      throw new Error(result.error || "The AI analysis could not be completed.");
+    }
     currentAiAnalysis = result.analysis;
     currentDetailedAnalysis = result.detailed || null;
     currentCategory = result.analysis.category;
@@ -1626,6 +1636,9 @@ async function analyzePhoto() {
     renderFollowupQuestions();
     announce(result.analysis.needsReview ? "AI review complete — please check this uncertain result." : "AI review complete. Check local disposal rules before acting.");
   } catch (error) {
+    if (analyzeRequestFailed) {
+      $("#model-status").querySelector("span").textContent = "AI server unavailable · local demo still works";
+    }
     $("#result-mode").textContent = "ANALYSIS FAILED";
     $("#result-category").textContent = "Could not analyze this photo";
     $("#result-advice").textContent = error.message || "The model request failed. Retry or choose a category manually.";

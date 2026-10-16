@@ -64,3 +64,7 @@ Records and small optional thumbnails for up to four recent analyzed photos rema
 - `POST /api/report` — generate the Gemini project report from validated, sanitized material records.
 
 For an API key setup check, add the key and restart first; the browser UI and endpoint status will confirm whether the server has loaded it.
+
+## Deploying to Vercel
+
+This project uses a vanilla JavaScript frontend and Vercel serverless functions in `api/`. Set `GEMINI_API_KEY` in the Vercel project's Environment Variables for the environments you deploy, then redeploy. `GEMINI_MODEL` is optional. After deployment, confirm `GET /api/status` reports `configured: true`, then select a photo and choose **Analyze photo with Gemini**; the browser should send a `POST /api/analyze` request. The key is read only by the server function and is never sent to the browser.
