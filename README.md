@@ -1,20 +1,21 @@
 # EcoSnapAI
 
-Hackathon prototype for the Smart Recycling Assistant track. The local app combines sample/manual material review, optional Gemini image analysis, a simulated Digital Twin, browser-local history, and an evidence-grounded recycling report with an optional Gemini narrative.
+Hackathon prototype for the Smart Recycling Assistant track. The local app combines sample/manual material review, optional Gemini image analysis, a simulated Digital Twin, browser-local or account-backed history, and an evidence-grounded recycling report with an optional Gemini narrative.
 
 ## Run locally
 
 1. Install Node.js 18 or newer.
 2. Open PowerShell in this folder.
-3. Start the server:
+3. Install the PostgreSQL driver and start the server:
 
    ```powershell
+   npm install
    node .\server.js
    ```
 
 4. Open <http://127.0.0.1:4173>.
 
-No npm packages are required.
+Gemini and demo features work without database credentials. Account syncing requires the Supabase and Postgres variables described below.
 
 ## Add your Gemini API key
 
@@ -44,7 +45,7 @@ Use the header theme button to cycle **Light**, **Dark**, and **3D** themes. The
 - **AI report narrative:** material category, item label, sample/manual/AI origin, simulated lifecycle stage, analysis timestamp/model, recorded event history, sanitized AI estimate details, detailed-analysis summaries, and validated user-provided condition answers for personalized context. Answers are labeled as self-reported, not AI-observed; original photos and report thumbnails are not sent.
 - **Offline project report:** generated entirely in the browser from saved records; nothing is sent to Gemini.
 
-Records and small optional thumbnails for up to four recent analyzed photos remain in this browser's `localStorage`; this prototype has no account system or server database. Full-size photos remain only in the current browser session and are not included in report requests. Use demo/sample records for a public hackathon demonstration and get consent before sending identifiable or sensitive images to an external AI provider.
+Signed-in users can store their saved material history in the connected Postgres database; guest history stays in this browser's `localStorage`. Account sessions are provided by Supabase Auth, and server endpoints verify each session and scope database access to that user's account. Small optional thumbnails for up to four recent analyzed photos are included in saved records. Full-size photos remain only in the current browser session and are not included in report requests. Use demo/sample records for a public hackathon demonstration and get consent before sending identifiable or sensitive images to an external AI provider.
 
 ## Prototype limitations
 
@@ -68,3 +69,13 @@ For an API key setup check, add the key and restart first; the browser UI and en
 ## Deploying to Vercel
 
 This project uses a vanilla JavaScript frontend and Vercel serverless functions in `api/`. Set `GEMINI_API_KEY` in the Vercel project's Environment Variables for the environments you deploy, then redeploy. `GEMINI_MODEL` is optional. After deployment, confirm `GET /api/status` reports `configured: true`, then select a photo and choose **Analyze photo with Gemini**; the browser should send a `POST /api/analyze` request. The key is read only by the server function and is never sent to the browser.
+
+### Configure Supabase Auth and Postgres
+
+1. In the Vercel project, connect the Supabase integration and the Postgres database. The server accepts the integration's `POSTGRES_URL` (preferred for serverless pooling), `POSTGRES_PRISMA_URL`, or `POSTGRES_URL_NON_POOLING`, along with `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY` (or `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`). Keep database URLs and passwords server-side; never add them to frontend code or commit them.
+2. In the Supabase project's **SQL Editor**, run [`database/schema.sql`](./database/schema.sql) once to create the per-user saved-records table. The API uses the server-side Postgres URL and scopes every operation to the Supabase-authenticated user.
+3. In Supabase **Authentication → Providers**, enable Email. Configure email confirmation and allowed redirect URLs for your deployed domain as appropriate.
+4. In Vercel, confirm those integration variables are available in the deployment environment and redeploy. `GET /api/status` reports `databaseConfigured: true` when the required variable names are present (it does not test connectivity or expose credentials).
+5. Use the **Your account** panel to create an account or sign in. Existing browser-local records are offered for explicit import after sign-in; new and changed records sync to that account. Guests continue to use browser-local history. Each account's saved dataset is limited to 3 MB.
+
+For local account/database testing, add the same variable names to `.env` using your own Supabase project's credentials, then run `npm install` before starting `node .\server.js`. Do not share `.env` values. Passwords and auth tokens are not stored in Postgres by this app; Supabase Auth manages credentials.

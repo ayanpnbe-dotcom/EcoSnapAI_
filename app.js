@@ -104,6 +104,7 @@ const assessmentQuestions = {
   unknown: [],
 };
 const storageKey = "ecosnapai-material-records-v1";
+const pendingStorageKey = "ecosnapai-pending-account-import-v1";
 const themeStorageKey = "ecosnapai-theme-v1";
 const themeOrder = ["light", "dark", "3d"];
 const themeDetails = {
@@ -128,6 +129,10 @@ let currentAssessmentAnswers = {};
 let currentDetailedAnalysis = null;
 let currentUserContext = {};
 let modelConfigured = false;
+let databaseConfigured = false;
+let authSession = loadAuthSession();
+let pendingLocalRecords = [];
+let cloudWriteQueue = Promise.resolve();
 let records = [];
 let toastTimer;
 let cameraStream = null;
@@ -141,6 +146,154 @@ function announce(message) {
   toast.classList.add("visible");
   window.clearTimeout(toastTimer);
   toastTimer = window.setTimeout(() => toast.classList.remove("visible"), 2600);
+}
+
+function loadAuthSession() {
+  try {
+    const stored = localStorage.getItem("ecosnapai-auth-session-v1");
+    const session = stored ? JSON.parse(stored) : null;
+    return session && typeof session.access_token === "string" &&
+      typeof session.refresh_token === "string" ? session : null;
+  } catch (error) {
+    console.error("EcoSnapAI could not load the saved account session.", error);
+    return null;
+  }
+}
+
+function saveAuthSession(session) {
+  authSession = session;
+  try {
+    if (session) localStorage.setItem("ecosnapai-auth-session-v1", JSON.stringify(session));
+    else localStorage.removeItem("ecosnapai-auth-session-v1");
+  } catch (error) {
+    console.error("EcoSnapAI could not save the account session.", error);
+    announce("Your account session could not be saved in this browser. Check storage settings.");
+  }
+  renderAccountState();
+}
+
+function renderAccountState() {
+  const signedIn = Boolean(authSession?.access_token);
+  $("#account-form").hidden = signedIn || !databaseConfigured;
+  $("#account-signout").hidden = !signedIn;
+  $("#dashboard-description").textContent = signedIn
+    ? "Counts are based on your signed-in account's saved scans. Journey stages are simulated."
+    : "Counts are based on scans saved in this browser. Journey stages are simulated.";
+  $("#metric-scope").textContent = signedIn ? "Observed in your account" : "Observed in this browser";
+  $("#account-status").textContent = !databaseConfigured
+    ? "Account storage is not configured yet. Add the Vercel Supabase and Postgres integration variables."
+    : signedIn
+      ? `Signed in${authSession.user?.email ? ` as ${authSession.user.email}` : ""}. Saved changes sync to your account.`
+      : "Sign in to sync your material history to your account. Guest history stays in this browser.";
+  $("#import-local-records").hidden = !signedIn || pendingLocalRecords.length === 0;
+}
+
+async function requestAuth(action, payload = {}, accessToken = "") {
+  const response = await fetch("/api/auth", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+    },
+    body: JSON.stringify({ action, ...payload }),
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(result.error || `Authentication request failed (${response.status}).`);
+  return result;
+}
+
+async function authenticatedFetch(url, options = {}) {
+  if (!authSession?.access_token) throw new Error("Sign in to access your saved account records.");
+  const perform = () => fetch(url, {
+    ...options,
+    headers: { ...(options.headers || {}), Authorization: `Bearer ${authSession.access_token}` },
+  });
+  let response = await perform();
+  if (response.status === 401 && authSession.refresh_token) {
+    const refreshed = await requestAuth("refresh", { refreshToken: authSession.refresh_token });
+    saveAuthSession(refreshed);
+    response = await perform();
+  }
+  return response;
+}
+
+async function loadCloudRecords() {
+  const response = await authenticatedFetch("/api/records");
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(result.error || "Could not load your account records.");
+  if (!Array.isArray(result.records)) throw new Error("The database returned invalid material records.");
+  return result.records;
+}
+
+async function writeCloudRecords(snapshot = records) {
+  if (!authSession?.access_token) return;
+  const response = await authenticatedFetch("/api/records", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ records: snapshot }),
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(result.error || "Could not sync your saved records.");
+}
+
+async function syncCloudRecords(snapshot = records) {
+  if (!authSession?.access_token) return;
+  const write = cloudWriteQueue.then(async () => {
+    await writeCloudRecords(snapshot);
+    return true;
+  });
+  cloudWriteQueue = write.catch((error) => {
+    console.error("EcoSnapAI could not sync saved records.", error);
+    announce(`Cloud sync failed: ${error.message}`);
+    return false;
+  });
+  return await cloudWriteQueue;
+}
+
+async function finishSignIn(session) {
+  if (!session.access_token || !session.refresh_token) {
+    $("#account-status").textContent = "Check your email to confirm your account, then sign in.";
+    return;
+  }
+  const pendingIds = new Set(pendingLocalRecords.map((record) => record.id));
+  pendingLocalRecords = [
+    ...pendingLocalRecords,
+    ...records.filter((record) => !pendingIds.has(record.id)),
+  ];
+  if (!savePendingLocalRecords()) {
+    announce("Could not preserve browser records waiting to be imported. Check this browser's storage settings.");
+    return;
+  }
+  saveAuthSession(session);
+  try {
+    const cloudRecords = await loadCloudRecords();
+    const cloudIds = new Set(cloudRecords.map((record) => record.id));
+    pendingLocalRecords = pendingLocalRecords.filter((record) => !cloudIds.has(record.id));
+    records = cloudRecords;
+    if (!savePendingLocalRecords()) throw new Error("Could not preserve browser records waiting to be imported.");
+    localStorage.setItem(storageKey, JSON.stringify(records));
+    renderDashboard();
+    updateTwinJourney();
+    renderAccountState();
+    announce(cloudRecords.length ? "Your account material history is ready." : "Signed in. Your account has no saved records yet.");
+  } catch (error) {
+    saveAuthSession(null);
+    console.error("EcoSnapAI could not load account records.", error);
+    announce(`Could not load your account records: ${error.message}`);
+  }
+}
+
+async function initializeAccount() {
+  try {
+    const response = await fetch("/api/status", { cache: "no-store" });
+    const status = await response.json();
+    databaseConfigured = status.databaseConfigured === true;
+  } catch (error) {
+    console.error("EcoSnapAI could not check database configuration.", error);
+  }
+  renderAccountState();
+  if (!databaseConfigured || !authSession) return;
+  await finishSignIn(authSession);
 }
 
 function applyTheme(theme, persist = false) {
@@ -352,9 +505,9 @@ themePreference.addEventListener("change", (event) => {
   applyTheme(event.matches ? "dark" : "light");
 });
 
-function loadRecords() {
+function loadRecordsFromStorage(key = storageKey) {
   try {
-    const stored = localStorage.getItem(storageKey);
+    const stored = localStorage.getItem(key);
     if (!stored) return [];
     const parsed = JSON.parse(stored);
     if (!Array.isArray(parsed) || parsed.some((record) =>
@@ -391,9 +544,24 @@ function loadRecords() {
   }
 }
 
-function persistRecords() {
+function savePendingLocalRecords() {
+  try {
+    if (pendingLocalRecords.length) {
+      localStorage.setItem(pendingStorageKey, JSON.stringify(pendingLocalRecords));
+    } else {
+      localStorage.removeItem(pendingStorageKey);
+    }
+    return true;
+  } catch (error) {
+    console.error("EcoSnapAI could not preserve browser records awaiting import.", error);
+    return false;
+  }
+}
+
+function persistRecords(syncCloud = true) {
   try {
     localStorage.setItem(storageKey, JSON.stringify(records));
+    if (syncCloud && authSession?.access_token) void syncCloudRecords(records.slice());
     return true;
   } catch (error) {
     console.error("EcoSnapAI could not save material records.", error);
@@ -824,7 +992,7 @@ function saveScan() {
   }
   renderDashboard();
   updateTwinJourney();
-  announce("Saved to your material twin in this browser.");
+  announce(authSession ? "Saved to your account's material twin." : "Saved to your material twin in this browser.");
   $("#dashboard").scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
@@ -1253,7 +1421,9 @@ function saveUpdatedAssessment(id, row) {
   }
   renderDashboard();
   if (!$("#report-output").hidden) refreshGeneratedReport();
-  announce("User-provided condition answers and guidance were updated in this browser.");
+  announce(authSession
+    ? "Condition answers and guidance were updated in your account."
+    : "User-provided condition answers and guidance were updated in this browser.");
 }
 
 function renderDashboard() {
@@ -1408,7 +1578,7 @@ function removeRecord(id) {
   }
   renderDashboard();
   updateTwinJourney();
-  announce("Material removed from this browser's history.");
+  announce(authSession ? "Material removed from your account history." : "Material removed from this browser's history.");
 }
 
 function loadDemoSet() {
@@ -1736,7 +1906,7 @@ function itemReportMarkdown(record, generatedAt = new Date().toISOString()) {
   const missing = [...assessment.missingFields, "Weight/quantity, previous/next destination, handler, local facility, per-stage weight, and environmental factors were not collected."]
     .map((field) => `- ${reportSafeLine(field)}`).join("\n");
   const image = record.photoThumbnail
-    ? `![Saved small item image thumbnail](${record.photoThumbnail})\n\n*Stored thumbnail from this browser; it is not a full-resolution image.*`
+    ? `![Saved small item image thumbnail](${record.photoThumbnail})\n\n*Stored thumbnail from the saved record; it is not a full-resolution image.*`
     : "Not provided or not retained in the browser.";
   const answerDetails = questionRows.length ? questionRows.join("\n") : "- No category-specific questions available; category needs human review.";
   const humanReview = assessment.manualReview || record.source === "manual-review"
@@ -1852,6 +2022,8 @@ function refreshGeneratedReport() {
 }
 
 function renderReportDashboard() {
+  const recordScope = authSession ? "your signed-in account" : "this browser";
+  const recordStorage = authSession ? "the account database" : "this browser's local storage";
   const aiCount = records.filter((record) => record.source === "ai-model" && record.aiSummary).length;
   const reviewCount = records.filter((record) =>
     record.category === "unknown" || record.source === "manual-review" || record.aiSummary?.needsReview
@@ -1924,19 +2096,19 @@ function renderReportDashboard() {
     .map((category) => `<span class="report-category-badge category-${category}">${escapeHtml(categories[category].label)} <b>${records.filter((record) => record.category === category).length}</b></span>`)
     .join("") || `<span class="report-caption">No material categories recorded.</span>`;
   return `<div class="report-cover">
-    <div><span class="overline">ECOSNAPAI · SMART RECYCLING ASSISTANT</span><h2>Material <em>insight report</em></h2><p>Evidence from saved scans in this browser. AI estimates and simulated activity are identified separately.</p></div>
+    <div><span class="overline">ECOSNAPAI · SMART RECYCLING ASSISTANT</span><h2>Material <em>insight report</em></h2><p>Evidence from saved scans in ${recordScope}. AI estimates and simulated activity are identified separately.</p></div>
     <div class="report-cover-id"><span>REPORT ID</span><strong>${escapeHtml($("#report-id").textContent)}</strong><small>${escapeHtml($("#report-generated-at").textContent)}</small></div>
   </div>
   <div class="report-kpi-grid">
-    <article><span>Saved material records</span><strong>${records.length}</strong><small>Observed in this browser</small></article>
+    <article><span>Saved material records</span><strong>${records.length}</strong><small>Observed in ${recordScope}</small></article>
     <article><span>AI visual estimates</span><strong>${aiCount}</strong><small>Not validated accuracy</small></article>
     <article><span>Needs human review</span><strong>${reviewCount}</strong><small>Uncertain, hazardous or manual</small></article>
     <article><span>Recorded lifecycle events</span><strong>${records.reduce((total, record) => total + record.events.length, 0)}</strong><small>Software simulation only</small></article>
   </div>
   <section class="report-section"><div class="report-section-heading"><div><span class="overline">01 · MATERIAL SNAPSHOT</span><h3>What was recorded</h3></div><div class="report-category-list">${categoriesMarkup}</div></div><div class="report-item-list">${itemCards}</div></section>
-  <section class="report-section"><div class="report-section-heading"><div><span class="overline">02 · CIRCULARITY</span><h3>Impact, without guesswork</h3></div></div><div class="report-impact-grid"><article><span>Saved item records</span><strong>${records.length} items</strong><small>Count from this browser's saved records only.</small></article><article><span>Measured material weight</span><strong>Insufficient data</strong><small>No item weights were measured or supplied.</small></article><article><span>Diverted / recovered mass</span><strong>Insufficient data</strong><small>No collection or processing evidence is connected.</small></article><article><span>Energy / emissions benefit</span><strong>Not calculated</strong><small>No documented factor or verified outcome is available.</small></article></div><p class="report-caption">Reuse, recycling and composting can support a circular economy when the item and local pathway are verified. This prototype does not claim that a saved scan caused any environmental outcome.</p></section>
+  <section class="report-section"><div class="report-section-heading"><div><span class="overline">02 · CIRCULARITY</span><h3>Impact, without guesswork</h3></div></div><div class="report-impact-grid"><article><span>Saved item records</span><strong>${records.length} items</strong><small>Count from ${recordScope}'s saved records.</small></article><article><span>Measured material weight</span><strong>Insufficient data</strong><small>No item weights were measured or supplied.</small></article><article><span>Diverted / recovered mass</span><strong>Insufficient data</strong><small>No collection or processing evidence is connected.</small></article><article><span>Energy / emissions benefit</span><strong>Not calculated</strong><small>No documented factor or verified outcome is available.</small></article></div><p class="report-caption">Reuse, recycling and composting can support a circular economy when the item and local pathway are verified. This prototype does not claim that a saved scan caused any environmental outcome.</p></section>
   <section class="report-section report-checklist"><div class="report-section-heading"><div><span class="overline">03 · BEFORE YOU ACT</span><h3>Action checklist</h3></div></div><ul><li>Review low-confidence, unknown and potentially hazardous classifications with a person.</li><li>Check your local waste authority for accepted materials and current drop-off options.</li><li>Do not place batteries, chemicals, medical items or other suspected hazards in ordinary recycling.</li><li>Treat all journey stages as simulated unless a real collection or processing event is independently verified.</li></ul></section>
-  <details class="report-technical"><summary>Data provenance, assumptions and limitations</summary><ul><li>Saved records and event timestamps come from this browser's local storage; they are not shared across devices.</li><li>Only actual saved AI response fields are presented as computer-vision estimates. Small thumbnails for up to four recent photo records stay in this browser; photos and thumbnails are not sent with the report request.</li><li>No object bounding boxes, secondary predictions, measured weights, facility destinations or environmental calculations are implemented.</li><li>Lifecycle stages are software-simulated, not sensor-verified physical movements. Local disposal rules are not integrated.</li></ul></details>`;
+  <details class="report-technical"><summary>Data provenance, assumptions and limitations</summary><ul><li>Saved records and event timestamps come from ${recordStorage}; signed-in account records can be accessed across devices.</li><li>Only actual saved AI response fields are presented as computer-vision estimates. Small thumbnails for up to four recent photo records are saved with the records; full-size photos are not stored in the database or sent with the report request.</li><li>No object bounding boxes, secondary predictions, measured weights, facility destinations or environmental calculations are implemented.</li><li>Lifecycle stages are software-simulated, not sensor-verified physical movements. Local disposal rules are not integrated.</li></ul></details>`;
 }
 
 function reportSafeLine(value) {
@@ -1944,6 +2116,8 @@ function reportSafeLine(value) {
 }
 
 function buildOfflineProjectReport() {
+  const recordScope = authSession ? "your signed-in account" : "this browser";
+  const recordStorage = authSession ? "your account database" : "browser-local history";
   const categoryCounts = Object.keys(categories)
     .map((category) => `- ${categories[category].label}: ${records.filter((record) => record.category === category).length}`)
     .join("\n");
@@ -1966,7 +2140,7 @@ function buildOfflineProjectReport() {
         : "";
       return `- ${reportSafeLine(record.itemName) || "Unidentified item"} (ID ${reportSafeLine(record.id)}) — ${categories[record.category].label}; ${stageLabels[record.status]} (simulated); ${record.source === "ai-model" ? "AI-assisted estimate" : record.source === "manual-review" ? "manual review" : "sample data"}${detail}.`;
     }).join("\n")
-    : "- No saved material records are present in this browser.";
+    : `- No saved material records are present in ${recordScope}.`;
   const aiDetails = records
     .filter((record) => record.aiSummary)
     .map((record) => {
@@ -1998,16 +2172,16 @@ function buildOfflineProjectReport() {
   return [
     "# EcoSnapAI — Smart Recycling Assistant",
     "",
-    `> Locally assembled report · ${generatedAt}. Counts come from this browser's saved records. No LLM-generated findings are included.`,
+    `> Locally assembled report · ${generatedAt}. Counts come from records in ${recordScope}. No LLM-generated findings are included.`,
     "",
     "## Executive summary",
-    `EcoSnapAI is a hackathon prototype that helps users review a waste-item photo or sample, see cautious next-step guidance, and track a simulated material journey. This browser currently contains **${records.length} saved ${records.length === 1 ? "record" : "records"}**, including **${needsReviewCount}** requiring manual or uncertain review. These counts describe this browser only; they do not show recycling outcomes or environmental impact.`,
+    `EcoSnapAI is a hackathon prototype that helps users review a waste-item photo or sample, see cautious next-step guidance, and track a simulated material journey. ${recordScope} currently contains **${records.length} saved ${records.length === 1 ? "record" : "records"}**, including **${needsReviewCount}** requiring manual or uncertain review. These counts describe ${recordScope}; they do not show recycling outcomes or environmental impact.`,
     "",
     "## Problem and target users",
     "People may be unsure what an everyday item is made from or how to prepare it for disposal. EcoSnapAI is designed as an educational starting point for households, students, and campus demonstrations; it is not a substitute for local waste-authority instructions.",
     "",
     "## Product features and user journey",
-    "Users can choose a demo item or add a photo, request a Gemini visual estimate, review a suggested action and item details, save a record to browser-local history, and move it through identified, sorted, recovery, and reuse stages. Filtering, category summaries, CSV export, record removal, and browser-local clearing are available in the dashboard. Journey stages are simulated.",
+    `Users can choose a demo item or add a photo, request a Gemini visual estimate, review a suggested action and item details, save a record to ${recordStorage}, and move it through identified, sorted, recovery, and reuse stages. Filtering, category summaries, CSV export, record removal, and history clearing are available in the dashboard. Journey stages are simulated.`,
     "",
     "## AI item analysis",
     "When the user explicitly requests image analysis, an optimized image copy is sent through the local server to Gemini. The response includes a likely category, item name, visible material, condition, confidence estimate, visible evidence, a cautious next step, preparation guidance, reuse possibility, and safety caveat. These are visual estimates, not verified material tests or disposal rules.",
@@ -2039,10 +2213,10 @@ function buildOfflineProjectReport() {
     "- No verified collection, processing, destination or environmental calculation factor is connected.",
     "",
     "## Architecture, privacy and safety",
-    "The browser interface stores records in localStorage. The Node.js server keeps the Gemini API key in the local .env file and serves the AI endpoints. Photo data is sent to Google only after the user selects AI analysis; smart report generation sends sanitized record metadata and validated user-provided condition answers, not photos. The prototype does not connect to local recycling rules. Potentially hazardous items need cautious human review and should not be opened, tested, or handled based on an AI suggestion.",
+    `Guest records stay in browser localStorage; signed-in records sync to the Postgres database through server endpoints after Supabase Auth verifies the user's session. The Node.js server keeps database credentials and the Gemini API key server-side. Photo data is sent to Google only after the user selects AI analysis; smart report generation sends sanitized record metadata and validated user-provided condition answers, not photos. The prototype does not connect to local recycling rules. Potentially hazardous items need cautious human review and should not be opened, tested, or handled based on an AI suggestion.`,
     "",
     "## Limitations and assumptions",
-    "Classification and confidence have not been validated for accuracy. Local rules, collection services, and actual material destinations are not integrated. Browser history is device/browser-specific, lifecycle changes are simulated, and no collection, recycling, reuse, diversion, or carbon-saving outcome is measured.",
+    "Classification and confidence have not been validated for accuracy. Local rules, collection services, and actual material destinations are not integrated. Guest history is device/browser-specific, lifecycle changes are simulated, and no collection, recycling, reuse, diversion, or carbon-saving outcome is measured.",
     "",
     "## Success metrics and validation plan",
     "Evaluate material-category accuracy against a human-labeled photo set; measure the proportion of uncertain items appropriately routed to review; test whether users understand preparation guidance; measure task completion time and accessibility with representative users; and separately verify whether location-specific guidance matches current official sources. Establish baselines before reporting any improvement.",
@@ -2068,7 +2242,9 @@ function buildOfflineProjectReport() {
 function generateOfflineReport() {
   const report = buildOfflineProjectReport();
   showGeneratedReport(report, `Generated locally · based on ${records.length} saved ${records.length === 1 ? "record" : "records"} · no Gemini request`);
-  announce("Offline project report generated from this browser's saved records.");
+  announce(authSession
+    ? "Offline project report generated from your account's saved records."
+    : "Offline project report generated from this browser's saved records.");
 }
 
 async function generateProjectReport() {
@@ -2173,7 +2349,7 @@ function downloadReportData() {
     application: "EcoSnapAI Smart Recycling Assistant",
     reportId: $("#report-id").textContent || null,
     exportedAt: new Date().toISOString(),
-    scope: "Records saved in this browser only. Image thumbnails are excluded from this data export.",
+    scope: authSession ? "Records saved in the signed-in account. Image thumbnails are excluded from this data export." : "Records saved in this browser only. Image thumbnails are excluded from this data export.",
     records: records.map(({ photoThumbnail, ...record }) => record),
   };
   const blob = new Blob([JSON.stringify(reportData, null, 2)], { type: "application/json;charset=utf-8" });
@@ -2336,7 +2512,8 @@ function clearHistory() {
     announce("There are no saved records to clear.");
     return;
   }
-  if (!window.confirm(`Clear all ${records.length} saved material records from this browser? This cannot be undone.`)) return;
+  const owner = authSession ? "your account" : "this browser";
+  if (!window.confirm(`Clear all ${records.length} saved material records from ${owner}? This cannot be undone.`)) return;
   const previousRecords = records;
   records = [];
   if (!persistRecords()) {
@@ -2348,7 +2525,7 @@ function clearHistory() {
   $("#date-filter").value = "";
   renderDashboard();
   updateTwinJourney();
-  announce("Material history cleared from this browser.");
+  announce(authSession ? "Your account material history was cleared." : "Material history cleared from this browser.");
 }
 
 $("#theme-toggle").addEventListener("click", cycleTheme);
@@ -2413,6 +2590,91 @@ $("#explain-scan").addEventListener("click", () => {
   explanation.hidden = false;
 });
 $("#save-scan").addEventListener("click", saveScan);
+$("#account-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const email = $("#account-email").value.trim();
+  const password = $("#account-password").value;
+  $("#account-signin").disabled = true;
+  $("#account-signup").disabled = true;
+  try {
+    await finishSignIn(await requestAuth("signin", { email, password }));
+  } catch (error) {
+    console.error("EcoSnapAI sign-in failed.", error);
+    announce(error.message);
+  } finally {
+    $("#account-signin").disabled = false;
+    $("#account-signup").disabled = false;
+  }
+});
+$("#account-signup").addEventListener("click", async () => {
+  const email = $("#account-email").value.trim();
+  const password = $("#account-password").value;
+  $("#account-signin").disabled = true;
+  $("#account-signup").disabled = true;
+  try {
+    await finishSignIn(await requestAuth("signup", { email, password }));
+    if (!authSession) announce("Account created. Check your email for confirmation, then sign in.");
+  } catch (error) {
+    console.error("EcoSnapAI account creation failed.", error);
+    announce(error.message);
+  } finally {
+    $("#account-signin").disabled = false;
+    $("#account-signup").disabled = false;
+  }
+});
+$("#account-signout").addEventListener("click", async () => {
+  const session = authSession;
+  try {
+    await requestAuth("signout", {}, session.access_token);
+  } catch (error) {
+    console.error("EcoSnapAI remote sign-out failed.", error);
+    announce(`Signed out here, but Supabase could not revoke the session: ${error.message}`);
+  } finally {
+    saveAuthSession(null);
+    pendingLocalRecords = [];
+    records = [];
+    try {
+      localStorage.removeItem(storageKey);
+      localStorage.removeItem(pendingStorageKey);
+    } catch (error) {
+      console.error("EcoSnapAI could not clear the local account cache.", error);
+      announce("Signed out, but this browser could not clear its saved cache. Clear site data if this is a shared device.");
+    }
+    renderDashboard();
+    updateTwinJourney();
+  }
+});
+$("#import-local-records").addEventListener("click", async () => {
+  const existingIds = new Set(records.map((record) => record.id));
+  const imported = pendingLocalRecords.filter((record) => !existingIds.has(record.id));
+  if (!imported.length) {
+    pendingLocalRecords = [];
+    savePendingLocalRecords();
+    renderAccountState();
+    return;
+  }
+  records = [...imported, ...records];
+  if (!persistRecords(false)) {
+    records = records.filter((record) => !imported.includes(record));
+    return;
+  }
+  const synced = await syncCloudRecords(records.slice());
+  if (!synced) {
+    records = records.filter((record) => !imported.includes(record));
+    persistRecords(false);
+    return;
+  }
+  const importedPendingRecords = pendingLocalRecords;
+  pendingLocalRecords = [];
+  if (!savePendingLocalRecords()) {
+    pendingLocalRecords = importedPendingRecords;
+    announce("Records were imported, but this browser could not clear the import reminder. Reload and check your account.");
+  }
+  renderDashboard();
+  updateTwinJourney();
+  renderAccountState();
+  announce(`Imported ${imported.length} browser record${imported.length === 1 ? "" : "s"} to your account.`);
+});
 $("#status-filter").addEventListener("change", renderDashboard);
 $("#category-filter").addEventListener("change", renderDashboard);
 $("#date-filter").addEventListener("change", renderDashboard);
@@ -2465,8 +2727,10 @@ $("#primary-nav").addEventListener("click", (event) => {
   }
 });
 
-records = loadRecords();
+records = loadRecordsFromStorage(storageKey);
+pendingLocalRecords = loadRecordsFromStorage(pendingStorageKey);
 setSample(currentCategory);
 renderDashboard();
 updateTwinJourney();
+initializeAccount();
 checkModelStatus();

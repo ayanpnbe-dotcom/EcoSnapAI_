@@ -240,9 +240,18 @@
 
       <section class="dashboard-section section-shell" id="dashboard" aria-labelledby="dashboard-title">
         <div class="section-label"><span>05</span><span class="label-line"></span><span>Your materials, in one place</span></div>
-        <div class="dashboard-heading"><div><h2 id="dashboard-title">A clearer view<br />of <em>what’s moving.</em></h2><p>Counts are based on scans saved in this browser. Journey stages are simulated.</p></div><div class="dashboard-legend"><span><i class="legend-observed"></i> Saved records</span><span><i class="legend-simulated"></i> Simulated stages</span></div></div>
+        <div class="dashboard-heading"><div><h2 id="dashboard-title">A clearer view<br />of <em>what’s moving.</em></h2><p id="dashboard-description">Counts are based on scans saved in this browser. Journey stages are simulated.</p></div><div class="dashboard-legend"><span><i class="legend-observed"></i> Saved records</span><span><i class="legend-simulated"></i> Simulated stages</span></div></div>
+        <section class="account-panel" aria-labelledby="account-title">
+          <div class="account-copy"><span class="overline">PRIVATE MATERIAL HISTORY</span><h3 id="account-title">Your account</h3><p id="account-status" role="status" aria-live="polite">Sign in to sync your material history to your account.</p></div>
+          <form id="account-form" class="account-form">
+            <label>Email<input id="account-email" type="email" autocomplete="email" maxlength="254" required /></label>
+            <label>Password<input id="account-password" type="password" autocomplete="current-password" minlength="8" maxlength="128" required /></label>
+            <div class="account-actions"><button class="button button-dark" id="account-signin" type="submit">Sign in</button><button class="utility-button" id="account-signup" type="button">Create account</button><button class="utility-button utility-danger" id="account-signout" type="button" hidden>Sign out</button></div>
+          </form>
+          <button class="utility-button" id="import-local-records" type="button" hidden>Import this browser’s saved records</button>
+        </section>
         <div class="metrics-grid">
-          <article class="metric-card"><span>Items saved</span><strong id="metric-total">0</strong><small>Observed in this browser</small></article>
+          <article class="metric-card"><span>Items saved</span><strong id="metric-total">0</strong><small id="metric-scope">Observed in this browser</small></article>
           <article class="metric-card"><span>Needs review</span><strong id="metric-review">0</strong><small>Unknown or manual review</small></article>
           <article class="metric-card"><span>In recovery</span><strong id="metric-recovery">0</strong><small>Simulated journey stage</small></article>
           <article class="metric-card"><span>Reuse stage</span><strong id="metric-reuse">0</strong><small>Simulated journey stage</small></article>

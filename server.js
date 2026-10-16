@@ -380,11 +380,21 @@ function validateReportInput(input) {
 }
 
 async function handleApi(request, response, pathname) {
+  if (pathname === "/api/auth" || pathname === "/api/records") {
+    const handler = require(path.join(root, pathname === "/api/auth" ? "api/auth.js" : "api/records.js"));
+    await handler(request, response);
+    return;
+  }
   if (request.method === "GET" && pathname === "/api/status") {
     sendJson(response, 200, {
       provider: "Google Gemini",
       model: process.env.GEMINI_MODEL || "gemini-3.1-flash-lite",
       configured: Boolean(process.env.GEMINI_API_KEY),
+      databaseConfigured: Boolean(
+        (process.env.POSTGRES_URL_NON_POOLING || process.env.POSTGRES_URL || process.env.POSTGRES_PRISMA_URL) &&
+        (process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL) &&
+        (process.env.SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY)
+      ),
     });
     return;
   }

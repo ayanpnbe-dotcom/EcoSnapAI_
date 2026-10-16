@@ -13,5 +13,10 @@ module.exports = function handler(request, response) {
     provider: "Google Gemini",
     model: process.env.GEMINI_MODEL || "gemini-3.1-flash-lite",
     configured: Boolean(process.env.GEMINI_API_KEY),
+    databaseConfigured: Boolean(
+      (process.env.POSTGRES_URL_NON_POOLING || process.env.POSTGRES_URL || process.env.POSTGRES_PRISMA_URL) &&
+      (process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL) &&
+      (process.env.SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY)
+    ),
   }));
 };
